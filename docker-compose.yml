@@ -1,0 +1,90 @@
+x-app: &app
+  build: .
+  image: dropout-risk-app
+  volumes: [".:/app"]
+  environment:
+    KAFKA_BOOTSTRAP: kafka:9092
+    HDFS_URL: http://namenode:9870
+    PYTHONPATH: /app/src
+    WEEK_DELAY_SECONDS: ${WEEK_DELAY_SECONDS:-3}
+  depends_on:
+    kafka: {condition: service_healthy}
+    namenode: {condition: service_healthy}
+    datanode: {condition: service_started}
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # ponytail: 1 partition per topic keeps week_end markers ordered after the week's data;
+      # more partitions would need a marker per partition
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    healthcheck:
+      test: /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+      interval: 10s
+      retries: 12
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    hostname: namenode
+    env_file: hadoop.env
+    environment:
+      CLUSTER_NAME: bda
+    ports: ["9870:9870"]
+    volumes: [namenode:/hadoop/dfs/name]
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    # WebHDFS redirects clients to the datanode by this hostname
+    hostname: datanode
+    env_file: hadoop.env
+    environment:
+      SERVICE_PRECONDITION: namenode:9870
+    volumes: [datanode:/hadoop/dfs/data]
+
+  consumer:
+    <<: *app
+    command: python src/consumer.py
+    restart: on-failure
+
+  producer:
+    <<: *app
+    command: sh -c "python src/download.py && python src/producer.py"
+
+  trainer:
+    <<: *app
+    command: python src/train.py --wait
+
+  scorer:
+    <<: *app
+    command: python src/score.py
+    restart: on-failure
+
+  dashboard:
+    <<: *app
+    command: streamlit run src/dashboard.py --server.address=0.0.0.0 --server.headless=true
+    ports: ["8501:8501"]
+    restart: on-failure
+
+  # one-off commands: docker compose run --rm app python src/<script>.py
+  app:
+    <<: *app
+    profiles: [tools]
+    command: "true"
+
+volumes:
+  namenode:
+  datanode:
